@@ -974,6 +974,20 @@ def create_product():
         return jsonify({"error": "Invalid price or stock"}), 400
     if category == '':
         category = 'General'
+    if image_url and image_url.startswith('data:') and os.environ.get('CLOUDINARY_URL'):
+        try:
+            timestamp = int(datetime.datetime.utcnow().timestamp())
+            public_id = f"product_new_{timestamp}"
+            upload_result = cloudinary.uploader.upload(
+                image_url,
+                folder="pimut_pos/products",
+                public_id=public_id,
+                overwrite=True,
+                invalidate=True
+            )
+            image_url = upload_result.get('secure_url') or image_url
+        except Exception as e:
+            print(f"[Product Create] Cloudinary upload of data URL failed: {e}")
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -989,7 +1003,27 @@ def create_product():
             )
         new_id = cursor.lastrowid
         conn.commit()
-        return jsonify({"message": "success", "id": new_id})
+        if image_url and image_url.startswith('data:') and not os.environ.get('CLOUDINARY_URL') and not os.environ.get('VERCEL'):
+            try:
+                is_vercel = os.environ.get('VERCEL') or os.environ.get('AWS_LAMBDA_FUNCTION_NAME')
+                if not is_vercel:
+                    os.makedirs(PRODUCT_UPLOAD_DIR, exist_ok=True)
+                    import re as _re
+                    import base64 as _base64
+                    m = _re.match(r'data:image/(png|jpeg|jpg|gif|webp);base64,(.*)', image_url, _re.S | _re.I)
+                    if m:
+                        ext = ('jpg' if m.group(1).lower() == 'jpeg' else m.group(1).lower())
+                        fname = f"product_{new_id}_{int(datetime.datetime.utcnow().timestamp())}.{ext}"
+                        path = os.path.join(PRODUCT_UPLOAD_DIR, fname)
+                        with open(path, 'wb') as fh:
+                            fh.write(_base64.b64decode(m.group(2)))
+                        local_url = f"/uploads/products/{fname}"
+                        conn.execute("UPDATE products SET image_url = ? WHERE id = ?", (local_url, new_id))
+                        conn.commit()
+                        image_url = local_url
+            except Exception as e:
+                print(f"[Product Create] Local data URL save failed: {e}")
+        return jsonify({"message": "success", "id": new_id, "image_url": image_url})
     except sqlite3.IntegrityError as e:
         err = str(e)
         if 'idx_products_barcode' in err or 'UNIQUE' in err:

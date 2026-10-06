@@ -13,6 +13,8 @@ const SECRET_KEY = 'your_secret_key_change_this_in_production';
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(express.static('.'));
+app.use('/uploads', express.static('uploads'));
+app.use('/uploads/products', express.static('uploads/products'));
 
 const db = new sqlite3.Database('./pos.db', (err) => {
     if (err) {
@@ -309,7 +311,35 @@ app.post('/api/products', authenticateToken, requireRole(['admin', 'assistant'])
                 }
                 return res.status(400).json({ error: err.message });
             }
-            res.json({ message: 'success', id: this.lastID });
+            const newId = this.lastID;
+            let finalImageUrl = image_url;
+            const trySaveLocalDataUrl = () => {
+                if (finalImageUrl && typeof finalImageUrl === 'string' && finalImageUrl.startsWith('data:')) {
+                    try {
+                        const fs = require('fs');
+                        const path = require('path');
+                        const m = finalImageUrl.match(/^data:image\/(png|jpeg|jpg|gif|webp);base64,(.*)$/i);
+                        if (m) {
+                            const uploadDir = path.join(__dirname, 'uploads', 'products');
+                            try { fs.mkdirSync(uploadDir, { recursive: true }); } catch (e) {}
+                            const ext = (m[1].toLowerCase() === 'jpeg') ? 'jpg' : m[1].toLowerCase();
+                            const fname = `product_${newId}_${Date.now()}.${ext}`;
+                            const fpath = path.join(uploadDir, fname);
+                            fs.writeFileSync(fpath, Buffer.from(m[2], 'base64'));
+                            const local_url = `/uploads/products/${fname}`;
+                            db.run("UPDATE products SET image_url = ? WHERE id = ?", [local_url, newId], (e2) => {
+                                if (!e2) finalImageUrl = local_url;
+                                res.json({ message: 'success', id: newId, image_url: finalImageUrl });
+                            });
+                            return;
+                        }
+                    } catch (e) {
+                        console.log('Local data URL save failed:', e.message);
+                    }
+                }
+                res.json({ message: 'success', id: newId, image_url: finalImageUrl });
+            };
+            trySaveLocalDataUrl();
         }
     );
 });

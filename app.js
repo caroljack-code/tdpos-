@@ -990,10 +990,10 @@ function renderProducts(productsToRender) {
         productCard.className = 'product-card' + (product.low_stock ? ' low-stock' : '');
         productCard.id = `product-card-${product.id}`;
         
-        // Helper to get full image URL (handles both cloud URLs and local paths)
+        // Helper to get full image URL (handles cloud URLs, data URLs, and local paths)
         const getImageUrl = (url) => {
             if (!url) return '';
-            if (url.startsWith('http')) return url;
+            if (url.startsWith('http') || url.startsWith('data:')) return url;
             // If it's a relative local path, prepend API_BASE
             // But if API_BASE is just localhost/127.0.0.1 and we are on a different device, 
             // it's better to use relative paths if we're on the same origin
@@ -1077,7 +1077,7 @@ window.handleVariantChange = function(parentId, variantId) {
     // Helper to get full image URL (reused from renderProducts logic)
     const getImageUrl = (url) => {
         if (!url) return '';
-        if (url.startsWith('http')) return url;
+        if (url.startsWith('http') || url.startsWith('data:')) return url;
         if (API_BASE) {
             try {
                 const baseHost = new URL(API_BASE).host;
@@ -2167,12 +2167,25 @@ window.createProduct = async function() {
         return;
     }
     try {
+        const file = imageFileEl && imageFileEl.files && imageFileEl.files[0];
+        let image_data_url = null;
+        if (file) {
+            image_data_url = await new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = () => resolve(null);
+                reader.readAsDataURL(file);
+            });
+        }
+        const body = { name, category, price, stock, barcode, min_price };
+        if (image_data_url) body.image_url = image_data_url;
         const response = await apiCall('/api/products', {
             method: 'POST',
-            body: JSON.stringify({ name, category, price, stock, barcode, min_price })
+            body: JSON.stringify(body)
         });
         const result = await response.json();
         if (response.ok && result.message === 'success') {
+            const newId = result.id;
             nameEl.value = '';
             if (catEl && typeof catEl.selectedIndex === 'number') {
                 catEl.selectedIndex = 0;
@@ -2183,14 +2196,12 @@ window.createProduct = async function() {
             stockEl.value = '';
             if (minEl) minEl.value = '';
             if (barcodeEl) barcodeEl.value = '';
-            if (imageFileEl) imageFileEl.value = ''; // Clear the file input
-            const newId = result.id;
-            const file = imageFileEl && imageFileEl.files && imageFileEl.files[0];
+            if (imageFileEl) imageFileEl.value = '';
             if (file && newId) {
-                await uploadProductImage(newId, file);
+                uploadProductImage(newId, file).catch(() => {});
             }
             if (errEl) errEl.style.display = 'none';
-            await fetchProducts(); // Await the refresh
+            await fetchProducts();
             alert('Product added successfully');
         } else {
             const msg = result.error || 'Failed to add product';
