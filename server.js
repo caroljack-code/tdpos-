@@ -266,6 +266,16 @@ app.get('/api/products/barcode/:barcode', (req, res) => {
     });
 });
 
+app.get('/api/products/:id', (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(404).json({ error: 'Not found' });
+    db.get("SELECT * FROM products WHERE id = ?", [id], (err, row) => {
+        if (err) return res.status(400).json({ error: err.message });
+        if (!row) return res.status(404).json({ error: 'Product not found' });
+        res.json({ message: 'success', data: row });
+    });
+});
+
 app.get('/api/products/low-stock', (req, res) => {
     db.all("SELECT * FROM products WHERE low_stock_threshold IS NOT NULL AND stock <= low_stock_threshold", [], (err, rows) => {
         if (err) return res.status(400).json({ error: err.message });
@@ -552,50 +562,110 @@ app.get('/api/sales/:id', authenticateToken, (req, res) => {
 
 app.post('/api/sales', authenticateToken, (req, res) => {
     const data = req.body || {};
-    const total = parseFloat(data.total || 0);
-    const subtotal = parseFloat(data.subtotal || 0);
-    const vat = parseFloat(data.vat || 0);
-    const items = data.items || [];
+    const rawItems = data.items || [];
     const payment_method = data.payment_method || 'cash';
     const payment_reference = data.payment_reference || '';
     const cashier = (req.user && req.user.username) || '';
 
+    const allowed_methods = {'cash':1, 'mpesa':1, 'bank':1, 'card':1, 'cheque':1, 'credit':1, 'jumia':1};
+    if (!allowed_methods[payment_method]) {
+        return res.status(400).json({ error: 'Invalid payment method' });
+    }
+    if (!Array.isArray(rawItems) || rawItems.length === 0) {
+        return res.status(400).json({ error: 'No items in sale' });
+    }
+    const items = [];
+    for (let i = 0; i < rawItems.length; i++) {
+        const it = rawItems[i];
+        const raw = (it.productId != null) ? it.productId : it.id;
+        const product_id = parseInt(raw, 10);
+        const quantity = parseInt((it.quantity != null ? it.quantity : 0), 10);
+        const price = parseFloat((it.price != null ? it.price : 0));
+        if (isNaN(product_id)) {
+            return res.status(400).json({ error: `Invalid item ${i+1}: bad product id` });
+        }
+        if (isNaN(quantity) || quantity <= 0) {
+            return res.status(400).json({ error: `Invalid quantity for item ${i+1} (product ${product_id})` });
+        }
+        if (isNaN(price)) {
+            return res.status(400).json({ error: `Invalid price for item ${i+1} (product ${product_id})` });
+        }
+        items.push({ product_id, quantity, price });
+    }
+
+    const subtotal = items.reduce((s, it) => s + (it.price * it.quantity), 0);
+    const vat = 0;
+    const total = subtotal + vat;
+
     db.serialize(() => {
         db.run("BEGIN TRANSACTION");
-        db.run(
-            "INSERT INTO sales (total, subtotal, vat, items, cashier, payment_method, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [total, subtotal, vat, JSON.stringify(items), cashier, payment_method, payment_reference],
-            function (err) {
-                if (err) {
-                    db.run("ROLLBACK");
-                    return res.status(400).json({ error: err.message });
-                }
-                const saleId = this.lastID;
-                const stmt = db.prepare("INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)");
-                let errorOccurred = false;
-                const updateStmt = db.prepare("UPDATE products SET stock = stock - ? WHERE id = ?");
-                (items || []).forEach(it => {
-                    if (errorOccurred) return;
-                    try {
-                        stmt.run([saleId, it.productId || it.id, parseInt(it.quantity || 0, 10), parseFloat(it.price || 0)]);
-                        updateStmt.run([parseInt(it.quantity || 0, 10), it.productId || it.id]);
-                    } catch (e) { errorOccurred = true; }
-                });
-                stmt.finalize();
-                updateStmt.finalize();
-                if (errorOccurred) {
-                    db.run("ROLLBACK");
-                    return res.status(400).json({ error: 'Failed to insert items' });
-                }
-                db.run("COMMIT", (err2) => {
-                    if (err2) {
-                        db.run("ROLLBACK");
-                        return res.status(400).json({ error: err2.message });
-                    }
-                    res.json({ message: 'success', saleId });
-                });
+        const checkProductSql = "SELECT id, name, stock, min_price FROM products WHERE id = ?";
+        const checksRemaining = [items.length];
+        let firstError = null;
+        const productsInfo = new Map();
+        let checkIdx = 0;
+        const doCheck = () => {
+            if (checkIdx >= items.length) {
+                finishAfterChecks();
+                return;
             }
-        );
+            const it = items[checkIdx++];
+            db.get(checkProductSql, [it.product_id], (err, row) => {
+                if (err) { if (!firstError) firstError = err.message; }
+                else if (!row) {
+                    if (!firstError) firstError = `Product not found (id=${it.product_id}). Try refreshing the page and re-adding the item.`;
+                } else {
+                    productsInfo.set(row.id, row);
+                    if (row.min_price != null && it.price < parseFloat(row.min_price)) {
+                        if (!firstError) firstError = `Price below minimum allowed for ${row.name}`;
+                    } else if (row.stock < it.quantity) {
+                        if (!firstError) firstError = `Insufficient stock for ${row.name} (have ${row.stock}, need ${it.quantity})`;
+                    }
+                }
+                doCheck();
+            });
+        };
+        const finishAfterChecks = () => {
+            if (firstError) {
+                db.run("ROLLBACK", () => res.status(400).json({ error: firstError }));
+                return;
+            }
+            db.run(
+                "INSERT INTO sales (total, subtotal, vat, items, cashier, payment_method, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [total, subtotal, vat, JSON.stringify(items.map(i => ({ productId: i.product_id, quantity: i.quantity, price: i.price }))), cashier, payment_method, payment_reference],
+                function (err) {
+                    if (err) {
+                        db.run("ROLLBACK");
+                        return res.status(400).json({ error: err.message });
+                    }
+                    const saleId = this.lastID;
+                    const stmt = db.prepare("INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)");
+                    const updateStmt = db.prepare("UPDATE products SET stock = stock - ? WHERE id = ?");
+                    let errorOccurred = false;
+                    items.forEach(it => {
+                        if (errorOccurred) return;
+                        try {
+                            stmt.run([saleId, it.product_id, it.quantity, it.price]);
+                            updateStmt.run([it.quantity, it.product_id]);
+                        } catch (e) { errorOccurred = true; firstError = (firstError || 'Failed to update stock/items'); }
+                    });
+                    stmt.finalize();
+                    updateStmt.finalize();
+                    if (errorOccurred) {
+                        db.run("ROLLBACK");
+                        return res.status(400).json({ error: firstError });
+                    }
+                    db.run("COMMIT", (err2) => {
+                        if (err2) {
+                            db.run("ROLLBACK");
+                            return res.status(400).json({ error: err2.message });
+                        }
+                        res.json({ message: 'success', saleId });
+                    });
+                }
+            );
+        };
+        doCheck();
     });
 });
 

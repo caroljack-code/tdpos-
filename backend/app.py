@@ -929,6 +929,17 @@ def get_product_by_barcode(barcode):
         return jsonify({"message": "success", "data": dict(product)})
     return jsonify({"error": "Product not found"}), 404
 
+@app.route('/products/<int:id>', methods=['GET'])
+@app.route('/api/products/<int:id>', methods=['GET'])
+@token_required
+def get_product_by_id(id):
+    conn = get_db_connection()
+    product = conn.execute('SELECT * FROM products WHERE id = ?', (id,)).fetchone()
+    conn.close()
+    if product:
+        return jsonify({"message": "success", "data": dict(product)})
+    return jsonify({"error": "Product not found"}), 404
+
 # POS-friendly products endpoint (explicitly allows all authenticated roles)
 @app.route('/api/pos/products', methods=['GET'])
 @token_required
@@ -1288,6 +1299,24 @@ def create_sale():
     if payment_method in {'mpesa', 'bank', 'card', 'cheque', 'credit', 'jumia'} and payment_reference is not None:
         payment_reference = str(payment_reference).strip() or None
 
+    normalized_items = []
+    for i, item in enumerate(items):
+        raw_id = item.get('productId') if item.get('productId') is not None else item.get('id')
+        try:
+            product_id = int(raw_id)
+        except Exception:
+            return jsonify({"error": f"Invalid item {i+1}: bad product id {repr(raw_id)}"}), 400
+        try:
+            quantity = int(item.get('quantity', 0))
+        except Exception:
+            return jsonify({"error": f"Invalid item {i+1} (product {product_id}): bad quantity"}), 400
+        try:
+            price = float(item.get('price', 0))
+        except Exception:
+            return jsonify({"error": f"Invalid item {i+1} (product {product_id}): bad price"}), 400
+        normalized_items.append({'productId': product_id, 'quantity': quantity, 'price': price})
+    items = normalized_items
+
     conn = get_db_connection()
     try:
         conn.execute("BEGIN TRANSACTION")
@@ -1318,13 +1347,14 @@ def create_sale():
             quantity = item['quantity']
             price = item['price']
             
-            cur = conn.execute("SELECT stock, min_price FROM products WHERE id = ?", (product_id,)).fetchone()
+            cur = conn.execute("SELECT id, name, stock, min_price FROM products WHERE id = ?", (product_id,)).fetchone()
             if not cur:
-                raise Exception("Product not found")
+                raise Exception(f"Product not found (id={product_id}). Try refreshing the page and re-adding the item.")
+            product_name = cur['name']
             if cur['min_price'] is not None and float(price) < float(cur['min_price']):
-                raise Exception("Price below minimum allowed")
+                raise Exception(f"Price below minimum allowed for {product_name}")
             if cur['stock'] < quantity:
-                raise Exception("Insufficient stock")
+                raise Exception(f"Insufficient stock for {product_name} (have {cur['stock']}, need {quantity})")
             
             conn.execute("UPDATE products SET stock = stock - ? WHERE id = ?", (quantity, product_id))
             

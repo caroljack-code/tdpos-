@@ -1351,12 +1351,20 @@ window.resumeHold = async function(id) {
         }
         const data = result.data || {};
         const items = Array.isArray(data.items) ? data.items : [];
-        cart = items.map(it => ({
-            productId: it.productId,
-            name: it.name,
-            price: Number(it.price),
-            quantity: Number(it.quantity)
-        }));
+        cart = items.map(it => {
+            const rawId = (it.productId != null) ? it.productId : it.id;
+            return {
+                productId: Number(rawId),
+                name: it.name || (it.product != null ? it.product.name : ''),
+                price: Number(it.price),
+                quantity: Number(it.quantity)
+            };
+        });
+        // Try to refresh missing products into state
+        try {
+            const anyMissing = cart.some(it => !products.find(p => Number(p.id) === Number(it.productId)));
+            if (anyMissing) await fetchProducts();
+        } catch (e) { /* ignore */ }
         renderCart();
         if (paymentMethodEl && data.payment_method) {
             window.selectPayment(data.payment_method);
@@ -1477,7 +1485,8 @@ if (productSearchInput) {
 
 // Add item to cart
 window.addToCart = function(productId, quantity = 1) {
-    const product = products.find(p => p.id === productId);
+    const pid = Number(productId);
+    const product = products.find(p => Number(p.id) === pid);
     if (!product || product.stock === 0) return;
     
     // Ensure quantity is a valid number and at least 1
@@ -1487,7 +1496,7 @@ window.addToCart = function(productId, quantity = 1) {
         return;
     }
 
-    const cartItem = cart.find(item => item.productId === productId);
+    const cartItem = cart.find(item => Number(item.productId) === pid);
     if (cartItem) {
         if (cartItem.quantity + qtyToAdd <= product.stock) {
             cartItem.quantity += qtyToAdd;
@@ -1497,9 +1506,9 @@ window.addToCart = function(productId, quantity = 1) {
     } else {
         if (qtyToAdd <= product.stock) {
             cart.push({
-                productId: product.id,
+                productId: Number(product.id),
                 name: product.name,
-                price: product.price,
+                price: Number(product.price),
                 quantity: qtyToAdd
             });
         } else {
@@ -1526,7 +1535,7 @@ async function apiBarcodeLookup(code) {
         const result = await response.json();
         if (response.ok && result.message === 'success' && result.data) {
             const p = result.data;
-            const existing = products.find(pr => pr.id === p.id);
+            const existing = products.find(pr => Number(pr.id) === Number(p.id));
             if (!existing) {
                 products.push(p);
             }
@@ -1561,7 +1570,8 @@ if (barcodeInput) {
 
 // Remove item from cart
 window.removeFromCart = function(productId) {
-    const index = cart.findIndex(item => item.productId === productId);
+    const pid = Number(productId);
+    const index = cart.findIndex(item => Number(item.productId) === pid);
     if (index !== -1) {
         cart.splice(index, 1);
         renderCart();
@@ -1578,15 +1588,16 @@ window.clearCart = function() {
 
 // Update quantity
 window.updateQuantity = function(productId, change) {
-    const cartItem = cart.find(item => item.productId === productId);
-    const product = products.find(p => p.id === productId);
+    const pid = Number(productId);
+    const cartItem = cart.find(item => Number(item.productId) === pid);
+    const product = products.find(p => Number(p.id) === pid);
     
     if (cartItem && product) {
         const newQuantity = cartItem.quantity + change;
         if (newQuantity > 0 && newQuantity <= product.stock) {
             cartItem.quantity = newQuantity;
         } else if (newQuantity <= 0) {
-            removeFromCart(productId);
+            removeFromCart(pid);
             return;
         }
     }
@@ -1632,8 +1643,9 @@ function renderCart() {
 }
 
 window.editPrice = function(productId) {
-    const item = cart.find(ci => ci.productId === productId);
-    const product = products.find(p => p.id === productId);
+    const pid = Number(productId);
+    const item = cart.find(ci => Number(ci.productId) === pid);
+    const product = products.find(p => Number(p.id) === pid);
     if (!item || !product) return;
     const current = item.price;
     const input = prompt(`Enter new price for ${item.name}`, String(current));
@@ -1651,9 +1663,6 @@ window.editPrice = function(productId) {
 checkoutBtn.addEventListener('click', async () => {
     if (cart.length === 0) return;
 
-    const subtotal = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-    const vat = Math.round(subtotal * VAT_RATE);
-    const total = subtotal + vat;
     const method = paymentMethodEl ? paymentMethodEl.value : 'cash';
     let reference = paymentRefEl ? paymentRefEl.value.trim() : '';
     if (method === 'bank') {
@@ -1663,16 +1672,74 @@ checkoutBtn.addEventListener('click', async () => {
             return;
         }
     }
+
+    let cartNeedsReRender = false;
+    for (let i = cart.length - 1; i >= 0; i--) {
+        const it = cart[i];
+        if (it.productId != null && typeof it.productId !== 'number') {
+            it.productId = parseInt(it.productId, 10);
+            cartNeedsReRender = true;
+        }
+        if (it.quantity != null && typeof it.quantity !== 'number') {
+            it.quantity = parseInt(it.quantity, 10) || 0;
+            cartNeedsReRender = true;
+        }
+        if (it.price != null && typeof it.price !== 'number') {
+            it.price = parseFloat(it.price) || 0;
+            cartNeedsReRender = true;
+        }
+        const p = products.find(pp => Number(pp.id) === Number(it.productId));
+        if (!p) {
+            try {
+                const presp = await apiCall(`/api/products/${encodeURIComponent(it.productId)}`, { allow404: true });
+                if (presp && presp.status === 404) {
+                    alert(`Item "${it.name}" no longer exists. Removing from cart.`);
+                    cart.splice(i, 1);
+                    cartNeedsReRender = true;
+                    continue;
+                }
+                if (presp && presp.ok) {
+                    const pres = await presp.json();
+                    if (pres && pres.message === 'success' && pres.data) {
+                        const existing = products.find(pr => Number(pr.id) === Number(pres.data.id));
+                        if (!existing) products.push(pres.data);
+                    }
+                }
+            } catch (e) { /* ignore */ }
+            try {
+                await fetchProducts();
+            } catch (e) { /* ignore */ }
+            const p2 = products.find(pp => Number(pp.id) === Number(it.productId));
+            if (!p2) {
+                alert(`Item "${it.name}" not in inventory. Please refresh and re-add.`);
+                return;
+            }
+        }
+    }
+    if (cart.length === 0) {
+        if (cartNeedsReRender) renderCart();
+        return;
+    }
+    if (cartNeedsReRender) renderCart();
+
+    const subtotal = cart.reduce((sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0);
+    const vat = Math.round(subtotal * VAT_RATE);
+    const total = subtotal + vat;
     const saleData = {
         total: total,
-        items: cart,
+        items: cart.map(it => ({
+            productId: parseInt(it.productId, 10),
+            quantity: parseInt(it.quantity, 10),
+            price: parseFloat(it.price),
+            name: it.name
+        })),
         payment_method: method,
         payment_reference: reference
     };
 
     try {
         for (const item of cart) {
-            const p = products.find(pp => pp.id === item.productId);
+            const p = products.find(pp => Number(pp.id) === Number(item.productId));
             if (p && p.min_price != null && Number(item.price) < Number(p.min_price)) {
                 alert(`This item cannot go below KES ${Number(p.min_price).toLocaleString()} (${p.name})`);
                 return;
@@ -1694,14 +1761,14 @@ checkoutBtn.addEventListener('click', async () => {
             const saleSubtotal = subtotal;
             const saleVat = vat;
             const saleTotal = total;
-            const method = saleData.payment_method;
-            const reference = saleData.payment_reference;
+            const sendMethod = saleData.payment_method;
+            const sendRef = saleData.payment_reference;
             
             cart = [];
             renderCart();
             fetchProducts();
             
-            showReceipt(saleId, items, saleSubtotal, saleVat, saleTotal, method, reference);
+            showReceipt(saleId, items, saleSubtotal, saleVat, saleTotal, sendMethod, sendRef);
         } else {
             const msg = result.error || result.message || `HTTP ${response.status}`;
             alert('Error processing sale: ' + msg);
