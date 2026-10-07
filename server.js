@@ -3,8 +3,11 @@ const sqlite3 = require('sqlite3').verbose();
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+let multer = null;
+try { multer = require('multer'); } catch (e) { multer = null; }
 
 const app = express();
 const port = 3000;
@@ -13,8 +16,55 @@ const SECRET_KEY = 'your_secret_key_change_this_in_production';
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(express.static('.'));
+try {
+    fs.mkdirSync(path.join(__dirname, 'uploads', 'products'), { recursive: true };
+} catch (e) {}
+try {
+    fs.mkdirSync(path.join(__dirname, 'uploads', 'branding')), { recursive: true };
+} catch (e) {}
 app.use('/uploads', express.static('uploads'));
 app.use('/uploads/products', express.static('uploads/products'));
+
+const PRODUCT_UPLOAD_DIR = path.join(__dirname, 'uploads', 'products');
+
+function saveProductImageFile(id, source) {
+    try {
+        if (!fs.existsSync(PRODUCT_UPLOAD_DIR)) {
+            fs.mkdirSync(PRODUCT_UPLOAD_DIR), { recursive: true });
+        }
+        let ext = 'jpg';
+        let buffer = null;
+        if (Buffer.isBuffer(source)) {
+            buffer = source;
+        } else if (typeof source === 'string') {
+            const m = source.match(/^data:image\/(png|jpeg|jpg|gif|webp);base64,(.*)$/i);
+            if (m) {
+                ext = (m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+                buffer = Buffer.from(m[2], 'base64');
+            }
+        } else if (source && typeof source.path) {
+            try {
+                buffer = fs.readFileSync(source.path);
+                const origExt = (source.originalname || source.name || '' ;
+                const mExt = path.extname(origExt).slice(1).toLowerCase();
+                if (mExt && ['png','jpeg','jpg','gif','webp'].includes(mExt)) {
+                    ext = (mExt === 'jpeg' ? 'jpg' : mExt;
+                }
+            } catch (e) {
+                    return null;
+                }
+            }
+        }
+        if (!buffer) return null;
+        const fname = `product_${id}_${Date.now()}.${ext}`;
+        const fpath = path.join(PRODUCT_UPLOAD_DIR, fname);
+        fs.writeFileSync(fpath, buffer);
+        return `/uploads/products/${fname}`;
+    } catch(e) {
+        console.error('saveProductImageFile error', e.message);
+        return null;
+    }
+}
 
 const db = new sqlite3.Database('./pos.db', (err) => {
     if (err) {

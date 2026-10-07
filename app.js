@@ -1439,13 +1439,14 @@ window.removeProductImage = async function(productId) {
 };
 
 async function uploadProductImage(productId, file) {
+    const pid = Number(productId);
     try {
         const form = new FormData();
         form.append('file', file);
         // Use relative path if same origin, otherwise prepend API_BASE
         const uploadUrl = (API_BASE && !API_BASE.includes(location.host)) 
-            ? `${API_BASE}/api/products/${productId}/image/upload` 
-            : `/api/products/${productId}/image/upload`;
+            ? `${API_BASE}/api/products/${pid}/image/upload` 
+            : `/api/products/${pid}/image/upload`;
             
         const response = await fetch(uploadUrl, {
             method: 'POST',
@@ -1455,17 +1456,19 @@ async function uploadProductImage(productId, file) {
         const result = await response.json();
         if (response.ok && result.message === 'success') {
             // Update local state directly so it reflects everywhere immediately
-            const product = products.find(p => p.id === productId);
+            const product = products.find(p => Number(p.id) === pid);
             if (product) {
                 product.image_url = result.image_url;
                 renderProducts(products); // Re-render immediately with new image
+                if (typeof renderVariants === 'function') { try { renderVariants(); } catch(e) {} }
             }
             // Background fetch to ensure everything is in sync
-            await fetchProducts();
+            try { await fetchProducts(); } catch (e) {}
         } else {
             alert('Image upload failed: ' + (result.error || 'Unknown error'));
         }
     } catch (e) {
+        console.error('Upload error:', e);
         alert('Failed to upload image');
     }
 }
@@ -2253,6 +2256,28 @@ window.createProduct = async function() {
         const result = await response.json();
         if (response.ok && result.message === 'success') {
             const newId = result.id;
+            const returned_image_url = result.image_url || null;
+            try {
+                const already = products.find(p => Number(p.id) === Number(newId));
+                if (!already) {
+                    const prod = {
+                        id: Number(newId),
+                        name: name,
+                        category: category,
+                        price: parseFloat(price) || 0,
+                        stock: parseInt(stock, 10) || 0,
+                        barcode: barcode || null,
+                        min_price: (min_price != null) ? parseFloat(min_price) : null,
+                        low_stock_threshold: null,
+                        image_url: returned_image_url
+                    };
+                    products.push(prod);
+                    renderProducts(products);
+                } else if (returned_image_url && !already.image_url) {
+                    already.image_url = returned_image_url;
+                    renderProducts(products);
+                }
+            } catch(e) {}
             nameEl.value = '';
             if (catEl && typeof catEl.selectedIndex === 'number') {
                 catEl.selectedIndex = 0;
@@ -2265,10 +2290,17 @@ window.createProduct = async function() {
             if (barcodeEl) barcodeEl.value = '';
             if (imageFileEl) imageFileEl.value = '';
             if (file && newId) {
-                uploadProductImage(newId, file).catch(() => {});
+                const needsUpload = !returned_image_url || returned_image_url.startsWith('data:') || !returned_image_url.startsWith('http');
+                if (needsUpload) {
+                    try {
+                        await uploadProductImage(newId, file);
+                    } catch (upErr) {
+                        console.warn('Image upload had issues, product was still saved:', upErr);
+                    }
+                }
             }
             if (errEl) errEl.style.display = 'none';
-            await fetchProducts();
+            try { await fetchProducts(); } catch(e) {}
             alert('Product added successfully');
         } else {
             const msg = result.error || 'Failed to add product';

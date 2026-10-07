@@ -96,6 +96,44 @@ def _write_local_version(ts):
     except Exception:
         pass
 
+def _is_cloudinary_configured():
+    global _CLOUD_NAME
+    try:
+        if _CLOUD_NAME:
+            return True
+        cfg = cloudinary.config()
+        if getattr(cfg, 'cloud_name', None):
+            _CLOUD_NAME = cfg.cloud_name
+            return True
+    except Exception:
+        pass
+    return bool(os.environ.get('CLOUDINARY_URL'))
+
+def _upload_image_to_cloudinary(source, public_id_prefix="product"):
+    """Upload any image source (FileStorage, data URL, or path-like) to Cloudinary.
+    Returns the secure https URL or None on failure."""
+    try:
+        timestamp = int(datetime.datetime.utcnow().timestamp())
+        public_id = f"{public_id_prefix}_{timestamp}"
+        upload_kwargs = dict(
+            folder="pimut_pos/products",
+            public_id=public_id,
+            overwrite=True,
+            invalidate=True,
+            timeout=60
+        )
+        if hasattr(source, 'seek'):
+            try: source.seek(0)
+            except Exception: pass
+        result = cloudinary.uploader.upload(source, **upload_kwargs)
+        url = result.get('secure_url') or result.get('url')
+        if url:
+            print(f"[Cloudinary] Uploaded -> {public_id}: {url[:80]}")
+            return url
+    except Exception as e:
+        print(f"[Cloudinary] Upload failed: {e}")
+    return None
+
 def _cloudinary_resource_info():
     try:
         r = cloudinary_api.resource(CLOUDINARY_DB_PUBLIC_ID, resource_type="raw")
@@ -985,20 +1023,10 @@ def create_product():
         return jsonify({"error": "Invalid price or stock"}), 400
     if category == '':
         category = 'General'
-    if image_url and image_url.startswith('data:') and os.environ.get('CLOUDINARY_URL'):
-        try:
-            timestamp = int(datetime.datetime.utcnow().timestamp())
-            public_id = f"product_new_{timestamp}"
-            upload_result = cloudinary.uploader.upload(
-                image_url,
-                folder="pimut_pos/products",
-                public_id=public_id,
-                overwrite=True,
-                invalidate=True
-            )
-            image_url = upload_result.get('secure_url') or image_url
-        except Exception as e:
-            print(f"[Product Create] Cloudinary upload of data URL failed: {e}")
+    if image_url and image_url.startswith('data:'):
+        cloud_url = _upload_image_to_cloudinary(image_url, public_id_prefix=f"product_new")
+        if cloud_url:
+            image_url = cloud_url
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -1014,7 +1042,7 @@ def create_product():
             )
         new_id = cursor.lastrowid
         conn.commit()
-        if image_url and image_url.startswith('data:') and not os.environ.get('CLOUDINARY_URL') and not os.environ.get('VERCEL'):
+        if image_url and image_url.startswith('data:'):
             try:
                 is_vercel = os.environ.get('VERCEL') or os.environ.get('AWS_LAMBDA_FUNCTION_NAME')
                 if not is_vercel:
@@ -1191,43 +1219,67 @@ def admin_set_password(user_id):
 def upload_product_image(id):
     file = request.files.get('file')
     if not file:
-        return jsonify({"error": "file required"}), 400
-    
+        data = request.get_json(silent=True) or {}
+        if data.get('file'):
+            file = data['file']
+        elif data.get('data_url'):
+            file = data['data_url']
+        else:
+            return jsonify({"error": "file required"}), 400
     is_vercel = os.environ.get('VERCEL') or os.environ.get('AWS_LAMBDA_FUNCTION_NAME')
     url = None
 
-    # We use the global Cloudinary config set at the top of the file
-    try:
-        # Generate a unique public_id using product ID and timestamp to avoid overwrites
-        timestamp = int(datetime.datetime.utcnow().timestamp())
-        public_id = f"product_{id}_{timestamp}"
-        
-        upload_result = cloudinary.uploader.upload(
-            file, 
-            folder="pimut_pos/products",
-            public_id=public_id,
-            overwrite=True,
-            invalidate=True
-        )
-        url = upload_result.get('secure_url')
-    except Exception as e:
-        print(f"Cloudinary upload failed: {e}")
-        # Fallback to local storage ONLY if not on Vercel
-        if is_vercel:
-            return jsonify({"error": f"Cloudinary upload failed and local storage is not persistent on Vercel: {str(e)}"}), 500
-        
-        print("Falling back to local storage.")
-        name = secure_filename(file.filename or '')
+    if _is_cloudinary_configured():
+        url = _upload_image_to_cloudinary(file, public_id_prefix=f"product_{id}")
+        if not url and is_vercel:
+            return jsonify({"error": "Cloudinary upload failed; local storage not persistent on Vercel"}), 500
+    elif is_vercel:
+        return jsonify({"error": "Cloudinary not configured; cannot persist images on Vercel"}), 500
+
+    if not url:
+        print("[Upload] Cloudinary unavailable or failed; falling back to local storage")
+        has_file_obj = hasattr(file, 'save') and callable(file.save)
+        name = ''
+        if has_file_obj:
+            name = secure_filename(file.filename or '')
+        else:
+            name = f"product_{id}.jpg"
         ext = os.path.splitext(name)[1].lower()
         if ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
-            return jsonify({"error": "invalid file type"}), 400
+            ext = '.jpg'
         os.makedirs(PRODUCT_UPLOAD_DIR, exist_ok=True)
         fname = f"product_{id}_{int(datetime.datetime.utcnow().timestamp())}{ext}"
         path = os.path.join(PRODUCT_UPLOAD_DIR, fname)
-        file.seek(0)
-        file.save(path)
+        if has_file_obj:
+            try: file.seek(0)
+            except Exception: pass
+            file.save(path)
+        else:
+            import re as _re
+            import base64 as _base64
+            if isinstance(file, str) and file.startswith('data:'):
+                m = _re.match(r'data:image/(png|jpeg|jpg|gif|webp);base64,(.*)', file, _re.S | _re.I)
+                if m:
+                    ext = ('jpg' if m.group(1).lower() == 'jpeg' else m.group(1).lower())
+                    fname = f"product_{id}_{int(datetime.datetime.utcnow().timestamp())}.{ext}"
+                    path = os.path.join(PRODUCT_UPLOAD_DIR, fname)
+                    with open(path, 'wb') as fh:
+                        fh.write(_base64.b64decode(m.group(2)))
+                else:
+                    return jsonify({"error": "invalid data URL"}), 400
+            elif isinstance(file, str):
+                try:
+                    import requests as _req
+                    r = _req.get(file, timeout=30)
+                    r.raise_for_status()
+                    with open(path, 'wb') as fh:
+                        fh.write(r.content)
+                except Exception as e:
+                    return jsonify({"error": f"Failed to fetch URL: {e}"}), 400
+            else:
+                return jsonify({"error": "unsupported file"}), 400
         url = f"/uploads/products/{fname}"
-        
+
     if not url:
         return jsonify({"error": "Failed to determine image URL"}), 500
 
@@ -1276,10 +1328,18 @@ def get_brand_logo():
             candidate = os.path.join(BRAND_UPLOAD_DIR, f"logo{ext}")
             if os.path.exists(candidate):
                 return jsonify({"message": "success", "image_url": f"/uploads/branding/logo{ext}"})
+        if _is_cloudinary_configured():
+            try:
+                info = cloudinary_api.resource("pimut_pos/branding/logo")
+                if info and info.get("secure_url"):
+                    return jsonify({"message": "success", "image_url": info["secure_url"]})
+            except Exception as ce:
+                if "404" not in str(ce) and "not found" not in str(ce).lower():
+                    print(f"[Logo] Cloudinary lookup failed: {ce}")
         return jsonify({"error": "not_found"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-# POST /sale
+
 @app.route('/sale', methods=['POST'])
 @app.route('/api/sales', methods=['POST']) # Alias for frontend compatibility
 @token_required
@@ -1590,6 +1650,7 @@ def get_low_stock_products():
 @app.route('/api/products/<int:id>/image', methods=['POST'])
 @token_required
 @role_required(['admin', 'assistant'])
+@sync_db
 def set_product_image(id):
     data = request.get_json() or {}
     image_url = (data.get('image_url') or '').strip()
@@ -1597,14 +1658,14 @@ def set_product_image(id):
         return jsonify({"error": "image_url required"}), 400
     try:
         secure_url = None
-        if os.environ.get('CLOUDINARY_URL'):
-            timestamp = int(datetime.datetime.utcnow().timestamp())
-            public_id = f"product_{id}_{timestamp}"
-            upload_result = cloudinary.uploader.upload(image_url, folder="pimut_pos/products", public_id=public_id, overwrite=True)
-            secure_url = upload_result.get('secure_url') or upload_result.get('url')
+        if _is_cloudinary_configured():
+            secure_url = _upload_image_to_cloudinary(image_url, public_id_prefix=f"product_{id}")
             if not secure_url:
-                return jsonify({"error": "Upload failed"}), 400
+                return jsonify({"error": "Cloudinary upload failed"}), 500
         else:
+            is_vercel = os.environ.get('VERCEL') or os.environ.get('AWS_LAMBDA_FUNCTION_NAME')
+            if is_vercel and image_url.startswith('data:'):
+                return jsonify({"error": "Cloudinary required on Vercel for persistent image storage"}), 500
             secure_url = image_url
         conn = get_db_connection()
         conn.execute("UPDATE products SET image_url = ? WHERE id = ?", (secure_url, id))
