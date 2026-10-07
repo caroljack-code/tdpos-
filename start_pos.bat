@@ -40,8 +40,8 @@ if !ERRORLEVEL! neq 0 (
 
 :: 3. Configure Port & Host
 set "POS_PORT=5000"
-:: Use 127.0.0.1 as primary to avoid getaddrinfo resolution issues
-set "POS_BIND_HOST=127.0.0.1"
+:: Bind to 0.0.0.0 so phones/tablets on the same Wi-Fi can connect
+set "POS_BIND_HOST=0.0.0.0"
 
 :: Auto-detect if port 5000 is busy
 netstat -ano | findstr :5000 | findstr LISTENING >nul
@@ -50,11 +50,34 @@ if !ERRORLEVEL! == 0 (
     set "POS_PORT=5001"
 )
 
+:: Auto-detect this PC's LAN IP so we can show the phone URL
+set "LAN_IP="
+for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /i "IPv4"') do (
+    for /f "tokens=* delims= " %%b in ("%%a") do (
+        set "candidate=%%b"
+        if "!LAN_IP!"=="" (
+            echo !candidate! | findstr /b /r "192\." >nul && set "LAN_IP=!candidate!"
+        )
+        if "!LAN_IP!"=="" (
+            echo !candidate! | findstr /b /r "10\." >nul && set "LAN_IP=!candidate!"
+        )
+        if "!LAN_IP!"=="" (
+            echo !candidate! | findstr /b /r "172\." >nul && set "LAN_IP=!candidate!"
+        )
+    )
+)
+
 echo.
 echo ======================================================
 echo   SERVER LAUNCH
 echo ======================================================
-echo  URL: http://!POS_BIND_HOST!:!POS_PORT!/
+echo  Local URL (this PC):  http://127.0.0.1:!POS_PORT!/
+if defined LAN_IP (
+echo  Phone/Device URL  :  http://!LAN_IP!:!POS_PORT!/
+) else (
+echo  Phone URL          :  Run ipconfig to get your PC's LAN IP
+)
+echo  Tip: Both devices must be on the SAME Wi-Fi network.
 echo ======================================================
 echo.
 
@@ -82,8 +105,17 @@ for /L %%i in (1,1,30) do (
 
 echo.
 if "!ready!"=="1" (
-    echo Server is ready! Launching POS...
-    start "" "http://!POS_BIND_HOST!:!POS_PORT!/"
+    echo Server is ready! Launching POS on this PC...
+    start "" "http://127.0.0.1:!POS_PORT!/"
+    echo.
+    echo ======================================================
+    echo  On your phone/tablet, open:
+    if defined LAN_IP (
+echo    http://!LAN_IP!:!POS_PORT!/
+    ) else (
+echo    http://[YOUR_PC_LAN_IP]:!POS_PORT!/
+    )
+echo ======================================================
 ) else (
     echo.
     echo [ERROR] The server is taking too long to start.

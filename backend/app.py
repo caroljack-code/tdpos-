@@ -1940,34 +1940,80 @@ def export_products_csv():
         return jsonify({"error": str(e)}), 500
     finally:
         conn.close()
-if __name__ == '__main__':
-    # Use 127.0.0.1 as the absolute primary for Windows stability
-    port = int(os.environ.get('POS_PORT', '5000'))
-    
-    # We try these specific addresses in order
-    hosts_to_try = ['127.0.0.1', 'localhost', '0.0.0.0']
-    
-    success = False
-    for h in hosts_to_try:
-        print(f"--- Attempting to start server on {h}:{port} ---")
+def _get_lan_ips():
+    ips = []
+    try:
+        import socket
+        host = socket.gethostname()
         try:
-            # We use use_reloader=False to avoid double-binding crashes on Windows
+            local_hosts = socket.gethostbyname_ex(host)
+            for ip in local_hosts[2]:
+                if not ip.startswith("127.") and not ip.startswith("169.254."):
+                    ips.append(ip)
+        except Exception:
+            pass
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ext_ip = s.getsockname()[0]
+            s.close()
+            if ext_ip and not ext_ip.startswith("127.") and ext_ip not in ips:
+                ips.insert(0, ext_ip)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return ips
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get('POS_PORT', '5000'))
+    bind_host = os.environ.get('POS_BIND_HOST', '').strip() or '0.0.0.0'
+
+    hosts_to_try = []
+    if bind_host and bind_host.lower() != 'auto':
+        hosts_to_try.append(bind_host)
+    hosts_to_try.extend(['0.0.0.0', '127.0.0.1', 'localhost'])
+    seen = set()
+    hosts_to_try = [h for h in hosts_to_try if not (h in seen or seen.add(h))]
+
+    lan_ips = _get_lan_ips()
+    print("=" * 58)
+    print("  PIMUT TRADERS POS SERVER")
+    print("=" * 58)
+    print(f"  Local access:    http://127.0.0.1:{port}/")
+    for ip in lan_ips:
+        print(f"  Phone/Device:    http://{ip}:{port}/")
+    if not lan_ips:
+        print(f"  Phone/Device:    [Find your PC's LAN IP under Network Settings]")
+    print("=" * 58)
+    print(" Allow the Firewall popup if shown so phones can connect.")
+    print()
+
+    success = False
+    last_error = None
+    for h in hosts_to_try:
+        print(f"--- Binding to {h}:{port} ---")
+        try:
             app.run(host=h, port=port, threaded=True, use_reloader=False)
             success = True
             break
         except Exception as e:
-            print(f"FAILED on {h}: {str(e)}")
+            last_error = str(e)
+            print(f"FAILED on {h}: {last_error}")
             continue
-        except:
-            print(f"CRITICAL ERROR on {h}")
+        except BaseException as e:
+            last_error = str(e)
+            print(f"CRITICAL ERROR on {h}: {last_error}")
             continue
-            
+
     if not success:
         print("\n******************************************************")
         print(" ERROR: The POS server could not start.")
-        print(" This usually happens if your Firewall is blocking it.")
-        print(" Please allow 'python.exe' through your Firewall.")
+        print(f" Last error: {last_error}")
+        print(" TIP: Check the TCP port is free OR allow python.exe")
+        print("      through Windows Firewall (private networks).")
         print("******************************************************")
         import time
-        time.sleep(10)
+        time.sleep(12)
         sys.exit(1)

@@ -838,6 +838,28 @@ button:active, .nav-links li:active, .product-card:active {
     transform: scale(0.98);
 }
 
+/* Mobile Touch Optimizations */
+* {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: default;
+}
+
+html, body {
+    touch-action: manipulation;
+}
+
+button, a, [role="button"], .nav-links li, .product-card, .pay-btn,
+.secondary-btn, .primary-btn, .item-actions button, .close-modal,
+input[type="checkbox"], input[type="radio"], select {
+    touch-action: manipulation;
+}
+
+/* Prevent double-tap zoom on numeric spinners */
+input[type="number"], input[type="text"], input[type="password"], input[type="search"] {
+    touch-action: manipulation;
+    font-size: 16px !important; /* Prevent iOS auto-zoom on focus */
+}
+
 /* Responsive & Tablet Support */
 @media (max-width: 1024px) {
     /* Tablet Landscape / Small Laptop */
@@ -961,7 +983,16 @@ button:active, .nav-links li:active, .product-card:active {
 
     .main-content {
         height: auto;
-        padding-bottom: 80px; /* space for bottom nav */
+        padding-bottom: calc(96px + env(safe-area-inset-bottom)); /* space for bottom nav + iPhone home indicator */
+    }
+
+    .mobile-bottom-nav {
+        display: flex !important; /* ensure it shows on small screens */
+    }
+
+    /* Hide the sidebar horizontal nav when bottom nav is shown to avoid duplication */
+    .sidebar .nav-links {
+        display: none !important;
     }
     
     .pos-layout {

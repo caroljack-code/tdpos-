@@ -1942,12 +1942,18 @@ if (closeReceiptBtn) {
     closeReceiptBtn.addEventListener('click', window.closeReceipt);
 }
 
-// Close modal when clicking outside
-window.onclick = function(event) {
-    if (event.target == receiptModal) {
+// Close modals when clicking outside the content
+window.addEventListener('click', function(event) {
+    if (receiptModal && event.target == receiptModal) {
         receiptModal.style.display = 'none';
     }
-};
+});
+
+// Show mobile bottom nav if this is a touch device, hide sidebar on tiny screens
+if (isMobile()) {
+    const mbNav = document.getElementById('mobile-bottom-nav');
+    if (mbNav) mbNav.style.display = '';
+}
 
 function ensureBarcodeFocus() {
     const posActive = document.getElementById('pos-view') && document.getElementById('pos-view').classList.contains('active');
