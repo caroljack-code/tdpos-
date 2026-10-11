@@ -1,0 +1,6 @@
+﻿{
+    "message":  "success",
+    "role":  "admin",
+    "token":  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJyb2xlIjoiYWRtaW4iLCJleHAiOjE3OTE3OTcwMzR9.7gYOlH5k7pHEEPuHvc1RpjYci2SX34c29YlQNQsU134",
+    "username":  "admin"
+}

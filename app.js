@@ -12,20 +12,18 @@ let authToken = localStorage.getItem('pos_token');
 let API_BASE = (localStorage.getItem('pos_api_base') || '').replace(/\/$/, '');
 const apiIndicator = document.getElementById('api-base-indicator');
 
-// Force relative API for Vercel or local development to avoid mixed tokens and CORS issues
+// On local/LAN networks, ALWAYS use relative URLs so both PC and phone
+// connect to the same backend (the one serving the page). This prevents
+// the common mistake of API_BASE pointing to 127.0.0.1 / localhost,
+// which breaks every phone/tablet on the network.
 try {
     const hostname = typeof location !== 'undefined' ? location.hostname : '';
     const isVercel = hostname.includes('vercel.app');
-    const isLocal = /^localhost$|^127\.0\.0\.1$/.test(hostname);
-    
-    if (isVercel) {
-        // On Vercel, ALWAYS use relative paths. Clear any stored absolute URL.
-        API_BASE = '';
-        localStorage.removeItem('pos_api_base');
-    } else if (isLocal && API_BASE) {
-        // Allow localhost, 127.0.0.1, or local network IPs (192.168.x.x, 10.x.x.x, etc.)
-        const isApiLocalOrLAN = /^(https?:\/\/)?(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+)(:\d+)?$/i.test(API_BASE);
-        if (!isApiLocalOrLAN) {
+    const isLocalOrLAN = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+)$/.test(hostname);
+
+    if (isVercel || isLocalOrLAN) {
+        // Relative paths only — no absolute API_BASE for local/LAN/vercel
+        if (API_BASE) {
             API_BASE = '';
             localStorage.removeItem('pos_api_base');
         }
@@ -172,7 +170,6 @@ if (authToken) {
     fetchProducts();
     fetchCategories();
     loadBrandLogo();
-    loadBrandLogo();
     if (barcodeInput) {
         safeFocus(barcodeInput);
     }
@@ -208,13 +205,47 @@ const isMobile = () => 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
 function safeFocus(el, force = false) {
     if (!el) return;
-    // On mobile, avoid focusing the barcode input automatically as it pops the keyboard and jumps
-    if (isMobile() && el === barcodeInput && !force) return;
+    if (isMobile() && el === barcodeInput) return;
     
     try {
         el.focus({ preventScroll: true });
     } catch (e) {
-        el.focus(); // Fallback for very old browsers
+        el.focus();
+    }
+}
+
+async function compressImage(file, maxWidth = 1280, maxHeight = 1280, quality = 0.8) {
+    try {
+        if (!file || !file.type || !file.type.startsWith('image/')) return file;
+        const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+        });
+        const img = await new Promise((resolve, reject) => {
+            const i = new Image();
+            i.onload = () => resolve(i);
+            i.onerror = reject;
+            i.src = dataUrl;
+        });
+        let { width, height } = img;
+        const scale = Math.min(maxWidth / width, maxHeight / height, 1);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+        const compressedDataUrl = canvas.toDataURL(mime, quality);
+        const compressedFile = await (await fetch(compressedDataUrl)).blob();
+        const ext = mime === 'image/png' ? 'png' : 'jpg';
+        return new File([compressedFile], (file.name || 'image').replace(/\.[^.]+$/, '') + '.' + ext, { type: mime });
+    } catch (e) {
+        console.warn('Image compression failed, using original:', e);
+        return file;
     }
 }
 
@@ -238,13 +269,23 @@ async function apiCall(url, options = {}) {
         }
         const fullUrl = url.startsWith('/api/') && API_BASE ? (API_BASE + url) : url;
         let response;
+
+        // Timeout: 12s for reads (retryable), 25s for writes (POST/PUT/DELETE)
+        const timeoutMs = isRead ? 12000 : 25000;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
         try {
-            response = await fetch(fullUrl, { ...options, headers });
+            response = await fetch(fullUrl, { ...options, headers, signal: controller.signal });
         } catch (e) {
+            clearTimeout(timeoutId);
             lastErr = e;
             if (url.startsWith('/api/') && API_BASE) {
                 try {
-                    response = await fetch(url, { ...options, headers });
+                    const ctrl2 = new AbortController();
+                    const tid2 = setTimeout(() => ctrl2.abort(), timeoutMs);
+                    response = await fetch(url, { ...options, headers, signal: ctrl2.signal });
+                    clearTimeout(tid2);
                 } catch (e2) {
                     if (attempt < maxRetries - 1) continue;
                     throw e;
@@ -254,6 +295,7 @@ async function apiCall(url, options = {}) {
                 throw e;
             }
         }
+        clearTimeout(timeoutId);
 
         if (response && response.status === 401) {
             authToken = null;
@@ -272,8 +314,17 @@ async function apiCall(url, options = {}) {
     throw lastErr || new Error('Request failed');
 }
 window.setApiBase = async function() {
+    const hostname = typeof location !== 'undefined' ? location.hostname : '';
+    const isLocalOrLAN = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+)$/.test(hostname);
+
+    if (isLocalOrLAN) {
+        if (!confirm('You are on a local/LAN network. Using a custom API URL is NOT recommended here — relative URLs work best for both PC and phones. Continue anyway?')) {
+            return;
+        }
+    }
+
     const current = API_BASE || '';
-    const next = prompt('Enter Backend URL (e.g., https://example.com)', current);
+    const next = prompt('Enter Backend URL (leave empty to use same origin / relative URLs)', current);
     if (next !== null) {
         const candidate = (next || '').trim().replace(/\/$/, '');
         if (!candidate) {
@@ -286,12 +337,12 @@ window.setApiBase = async function() {
                 API_BASE = candidate;
                 localStorage.setItem('pos_api_base', API_BASE);
             } catch (e) {
-                alert('Backend unreachable. Ensure HTTPS and correct host.');
+                alert('Backend unreachable. Ensure correct host and port.');
                 return;
             }
         }
-        if (apiIndicator) apiIndicator.textContent = API_BASE ? ('API: ' + API_BASE) : 'API: not set';
-        if (loginApiIndicator) loginApiIndicator.textContent = API_BASE ? ('API: ' + API_BASE) : 'API: not set';
+        if (apiIndicator) apiIndicator.textContent = API_BASE ? ('API: ' + API_BASE) : 'API: same origin';
+        if (loginApiIndicator) loginApiIndicator.textContent = API_BASE ? ('API: ' + API_BASE) : 'API: same origin';
         window.location.reload();
     }
 };
@@ -1414,8 +1465,9 @@ window.setProductImage = async function(productId) {
     input.type = 'file';
     input.accept = 'image/*';
     input.onchange = async () => {
-        const file = input.files && input.files[0];
+        let file = input.files && input.files[0];
         if (!file) return;
+        file = await compressImage(file);
         await uploadProductImage(productId, file);
     };
     input.click();
@@ -1443,33 +1495,39 @@ async function uploadProductImage(productId, file) {
     try {
         const form = new FormData();
         form.append('file', file);
-        // Use relative path if same origin, otherwise prepend API_BASE
-        const uploadUrl = (API_BASE && !API_BASE.includes(location.host)) 
-            ? `${API_BASE}/api/products/${pid}/image/upload` 
-            : `/api/products/${pid}/image/upload`;
-            
+        // Always use relative URL — API_BASE is forced empty on local/LAN networks
+        const uploadUrl = `/api/products/${pid}/image/upload`;
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
+
         const response = await fetch(uploadUrl, {
             method: 'POST',
             headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {},
-            body: form
+            body: form,
+            signal: controller.signal
         });
+        clearTimeout(timeoutId);
+
         const result = await response.json();
         if (response.ok && result.message === 'success') {
-            // Update local state directly so it reflects everywhere immediately
             const product = products.find(p => Number(p.id) === pid);
             if (product) {
                 product.image_url = result.image_url;
-                renderProducts(products); // Re-render immediately with new image
+                renderProducts(products);
                 if (typeof renderVariants === 'function') { try { renderVariants(); } catch(e) {} }
             }
-            // Background fetch to ensure everything is in sync
             try { await fetchProducts(); } catch (e) {}
         } else {
             alert('Image upload failed: ' + (result.error || 'Unknown error'));
         }
     } catch (e) {
         console.error('Upload error:', e);
-        alert('Failed to upload image');
+        if (e.name === 'AbortError') {
+            alert('Image upload timed out. Please try again.');
+        } else {
+            alert('Failed to upload image. Check your connection.');
+        }
     }
 }
 // Search Functionality
@@ -1956,6 +2014,7 @@ if (isMobile()) {
 }
 
 function ensureBarcodeFocus() {
+    if (isMobile()) return;
     const posActive = document.getElementById('pos-view') && document.getElementById('pos-view').classList.contains('active');
     if (barcodeInput && posActive) {
         const el = document.activeElement;
@@ -1969,6 +2028,7 @@ function ensureBarcodeFocus() {
 
 document.addEventListener('keydown', (e) => {
     if (!barcodeInput) return;
+    if (isMobile()) return;
     if (receiptModal && receiptModal.style.display === 'block') return;
     const tag = (e.target.tagName || '').toLowerCase();
     const isInputLike = tag === 'input' || tag === 'textarea' || e.target.isContentEditable;
@@ -1976,7 +2036,7 @@ document.addEventListener('keydown', (e) => {
     if (!isBarcodeFocused && !isInputLike) {
         if (e.key.length === 1 && /[0-9A-Za-z]/.test(e.key)) {
             e.preventDefault();
-            safeFocus(barcodeInput, true); // Force focus when user starts typing
+            safeFocus(barcodeInput, true);
             barcodeInput.value += e.key;
         } else if (e.key === 'Enter') {
             e.preventDefault();
@@ -1985,7 +2045,7 @@ document.addEventListener('keydown', (e) => {
                 processBarcode(val);
                 barcodeInput.value = '';
             }
-            safeFocus(barcodeInput, true); // Force refocus
+            safeFocus(barcodeInput, true);
         }
     }
 });
@@ -2243,7 +2303,10 @@ window.createProduct = async function() {
         return;
     }
     try {
-        const file = imageFileEl && imageFileEl.files && imageFileEl.files[0];
+        let file = imageFileEl && imageFileEl.files && imageFileEl.files[0];
+        if (file) {
+            file = await compressImage(file);
+        }
         let image_data_url = null;
         if (file) {
             image_data_url = await new Promise((resolve) => {

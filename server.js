@@ -17,10 +17,10 @@ app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(express.static('.'));
 try {
-    fs.mkdirSync(path.join(__dirname, 'uploads', 'products'), { recursive: true };
+    fs.mkdirSync(path.join(__dirname, 'uploads', 'products'), { recursive: true });
 } catch (e) {}
 try {
-    fs.mkdirSync(path.join(__dirname, 'uploads', 'branding')), { recursive: true };
+    fs.mkdirSync(path.join(__dirname, 'uploads', 'branding'), { recursive: true });
 } catch (e) {}
 app.use('/uploads', express.static('uploads'));
 app.use('/uploads/products', express.static('uploads/products'));
@@ -30,7 +30,7 @@ const PRODUCT_UPLOAD_DIR = path.join(__dirname, 'uploads', 'products');
 function saveProductImageFile(id, source) {
     try {
         if (!fs.existsSync(PRODUCT_UPLOAD_DIR)) {
-            fs.mkdirSync(PRODUCT_UPLOAD_DIR), { recursive: true });
+            fs.mkdirSync(PRODUCT_UPLOAD_DIR, { recursive: true });
         }
         let ext = 'jpg';
         let buffer = null;
@@ -39,20 +39,19 @@ function saveProductImageFile(id, source) {
         } else if (typeof source === 'string') {
             const m = source.match(/^data:image\/(png|jpeg|jpg|gif|webp);base64,(.*)$/i);
             if (m) {
-                ext = (m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+                ext = (m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase());
                 buffer = Buffer.from(m[2], 'base64');
             }
         } else if (source && typeof source.path) {
             try {
                 buffer = fs.readFileSync(source.path);
-                const origExt = (source.originalname || source.name || '' ;
+                const origExt = (source.originalname || source.name || '');
                 const mExt = path.extname(origExt).slice(1).toLowerCase();
                 if (mExt && ['png','jpeg','jpg','gif','webp'].includes(mExt)) {
-                    ext = (mExt === 'jpeg' ? 'jpg' : mExt;
+                    ext = (mExt === 'jpeg' ? 'jpg' : mExt);
                 }
             } catch (e) {
-                    return null;
-                }
+                return null;
             }
         }
         if (!buffer) return null;
