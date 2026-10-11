@@ -22,7 +22,7 @@ except Exception:
     requests = None
 
 IS_SERVERLESS = bool(os.environ.get('VERCEL') or os.environ.get('AWS_LAMBDA_FUNCTION_NAME'))
-CLOUDINARY_DB_PUBLIC_ID = "pimut_pos/data/pos_db"
+CLOUDINARY_DB_PUBLIC_ID = "pimut_pos/data/pos_db.db"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.join(BASE_DIR, '..')
 
@@ -150,6 +150,7 @@ def _cloudinary_resource_info():
     return None
 
 def _cloudinary_db_url(version=None):
+    global _CLOUD_NAME
     if not _CLOUD_NAME:
         try:
             _CLOUD_NAME = cloudinary.config().cloud_name
@@ -597,16 +598,18 @@ def db_info():
 # Login Route
 @app.route('/uploads/<path:filename>')
 def serve_uploads(filename):
-    # Try /tmp first (for new uploads on Vercel)
-    tmp_dir = os.path.join('/tmp', 'uploads')
-    if os.path.exists(os.path.join(tmp_dir, filename)):
-        return send_from_directory(tmp_dir, filename)
-    
-    # Try repo path (for pre-existing files)
-    repo_dir = os.path.join(BASE_DIR, 'uploads')
-    if os.path.exists(os.path.join(repo_dir, filename)):
-        return send_from_directory(repo_dir, filename)
-        
+    search_dirs = []
+    if IS_SERVERLESS:
+        search_dirs.append(os.path.join(_TMPDIR, 'uploads'))
+    search_dirs.append(os.path.join(BASE_DIR, 'uploads'))
+    search_dirs.append(os.path.join(FRONTEND_DIR, 'uploads'))
+
+    for d in search_dirs:
+        candidate = os.path.join(d, filename)
+        if os.path.isfile(candidate):
+            return send_from_directory(d, filename)
+
+    print(f"[serve_uploads] 404 for {filename!r} (checked {search_dirs})")
     return make_response("File not found", 404)
 
 @app.route('/login', methods=['POST'])
